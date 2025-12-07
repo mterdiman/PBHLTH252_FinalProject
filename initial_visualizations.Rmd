@@ -1,0 +1,79 @@
+---
+author: "Mira & Angela"
+output: pdf_document
+---
+
+```{r}
+library(tidyverse)
+library(readr)
+library(zoo)
+# read in monthly HIV incidence CSV
+
+hiv_inc <- read.csv("/Users/miraterdiman/Desktop/My Folder Folder/MPH Year 1/PBHLTH 252/FINAL PROJECT_HIV/month_hiv.csv")
+```
+
+# HIV Incidence Plots
+
+Initial plot:
+
+```{r}
+hiv_inc %>%
+  ggplot(aes(x = Months..num., y = Cases)) +
+  geom_point(color = "blue") +
+  geom_line(color = "gold") +
+  labs(x = "Month") +
+  ggtitle("Monthly HIV Incidence, 2016-2022") +
+  theme_minimal()
+
+#clear reporting dips in final months of the year, seasonal trends in reporting
+```
+
+Smoothing seasonal trends:
+
+```{r}
+hiv_inc_ts <- ts(hiv_inc$Cases, start = c(2016,1), frequency = 12)
+decomp <- stl(hiv_inc_ts, s.window = "periodic")
+plot(decomp, main = "HIV Monthly Cases: Trend, Seasonality, and Noise")
+```
+
+```{r}
+trend <- decomp$time.series[, "trend"]
+hiv_inc$trend <- as.numeric(trend)
+hiv_inc$month_num <- 1:nrow(hiv_inc)
+
+time_vals <- time(hiv_inc_ts)
+hiv_inc$year <- floor(time_vals)
+hiv_inc$month_in_year <- round((time_vals - hiv_inc$year) * 12 + 1)
+hiv_inc$year_month <- as.Date(as.yearmon(time_vals))
+
+ggplot(hiv_inc, aes(x = month_num)) +
+  geom_line(aes(y = Cases), color = "gold") +
+  geom_line(aes(y = trend), color = "blue", size = 1.2) +
+  labs(
+    title = "HIV Monthly Reported Cases - Trends from 2016-2022",
+    x = "Month",
+    y = "Cases"
+  ) +
+  theme_minimal()
+```
+
+# PrEP Plots
+
+```{r}
+library(scales)
+
+PrEP_data <- readxl::read_excel("/Users/miraterdiman/Desktop/My Folder Folder/MPH Year 1/PBHLTH 252/FINAL PROJECT_HIV/Datasets/PrEP_Data.xlsx")
+
+PrEP_data
+
+PrEP_data %>%
+  ggplot(aes(x = as.factor(Year), y = `PrEP Users`)) +
+  geom_line(group = 1, color = "gold") +
+  geom_point(color = "blue") +
+  labs(x = "Year", y = "People Prescribed PrEP ") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) + 
+  ggtitle("Annual Number of People Prescribed PrEP in the US: 2012-2022")
+```
+
+
