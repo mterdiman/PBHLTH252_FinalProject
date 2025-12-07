@@ -1,0 +1,217 @@
+---
+author: "Mira & Angela"
+output: pdf_document
+---
+
+```{r}
+library(tidyverse)
+
+PrEP_data <- readxl::read_excel("/Users/miraterdiman/Desktop/My Folder Folder/MPH Year 1/PBHLTH 252/FINAL PROJECT_HIV/Datasets/PrEP_Data.xlsx")
+
+PrEP_data <- PrEP_data %>%
+  rename(PrEP_Users = `PrEP Users`)
+
+PrEP_data
+```
+
+To estimate our parameter, "p," which is the PrEP uptake rate of our model, we will use a regression method (similar to what we applied in Practical 5). 
+
+```{r}
+p_regression <- lm(log(PrEP_Users) ~ Year, data = PrEP_data)
+
+r <- coef(p_regression)["Year"]
+
+r
+```
+
+This gives us a growth rate, but we also need to incorporate PrEP duration and the total population size.
+
+
+```{r}
+dis_rate <- 1 / 14 #discontinuation rate(in months)
+p <- r+dis_rate
+p
+```
+
+This is a crude method, but we need to account for our actual ODE structure:
+
+```{r}
+library(dplyr)
+library(minpack.lm)
+
+
+pop <- 6000000 #changing to more at-risk population, who would actually be prescribed PrEP
+
+
+## 2) Clean and augment the PrEP data ----
+## PrEP_data should have:
+##   - Year (numeric, e.g. 2012, 2013, ...)
+##   - PrEP_Users (number of people on PrEP that year)
+
+
+PrEP_data <- PrEP_data %>%
+  arrange(Year) %>%
+  mutate(
+    coverage = PrEP_Users / pop  # fraction of 15–64 yr olds on PrEP
+  )
+
+
+
+print(PrEP_data)
+
+## 3) (Optional) Rough initial guess for growth rate from early years ----
+## This is *only* used as a starting value for the nonlinear fit,
+## not for final parameter estimates.
+
+
+
+PrEP_fit <- lm(log(PrEP_Users) ~ Year, data = PrEP_data)
+summary(PrEP_fit)
+
+r <- as.numeric(coef(PrEP_fit)["Year"])  # per-year growth guess
+r
+
+
+
+fit_logistic <- nlsLM(PrEP_Users ~ K / (1 + exp(-r * (Year - t0))),
+  data = PrEP_data,
+  start = list(
+    K  = max(PrEP_data$PrEP_Users) * 1.2, 
+    r  = ifelse(is.finite(r), r, 0.4),
+    t0 = median(PrEP_data$Year)
+  )
+)
+
+summary(fit_logistic)
+
+pars <- coef(fit_logistic)
+K_hat  <- as.numeric(pars["K"])
+r_hat  <- as.numeric(pars["r"])
+t0_hat <- as.numeric(pars["t0"])
+
+K_hat; r_hat; t0_hat
+
+## 5) Convert logistic parameters into p (uptake) and b (drop-off) ----
+## We assume the reduced S–P system:
+##   dP/dt = p (N - P) - b P
+## This has solution of the form:
+##   P(t) = P_inf * (1 - exp(-(p + b)(t - t0)))
+## which matches a logistic curve with:
+##   r_logistic = p + b
+##   K = P_inf  = (p / (p + b)) * N
+##
+## Let:
+##   c = K / N  (asymptotic coverage)
+## Then:
+##   p = r * c
+##   b = r * (1 - c)
+
+coverage_inf <- K_hat / pop     # asymptotic coverage (fraction)
+p_hat        <- r_hat * coverage_inf       # uptake per susceptible per year
+b_hat        <- r_hat * (1 - coverage_inf) # discontinuation per PrEP user per year
+
+## 6) Print interpretable results ----
+cat("\n========== PrEP uptake parameter estimates ==========\n")
+cat("Assumed 15–64 population N =", format(round(pop), big.mark = ","), "\n")
+cat("Estimated logistic growth rate r =", round(r, 3), "per year\n")
+cat("Estimated asymptotic PrEP coverage =", round(coverage_inf * 100, 1), "% of 15–64 population\n\n")
+
+cat("PrEP uptake rate p (S -> P):\n")
+cat("  p =", round(p_hat, 3), "per susceptible per year\n\n")
+
+cat("PrEP discontinuation rate b (P -> S):\n")
+cat("  b =", round(b_hat, 3), "per PrEP user per year\n")
+cat("  Mean time on PrEP ~", round(1 / b_hat, 2), "years\n")
+cat("======================================================\n")
+```
+
+Trying again, but setting a known value for the discontinuation rate (1/13 months), since we already approximated that from the literature.
+
+```{r}
+## 2) Population assumptions ----
+
+## Total US population and 15–64 fraction (for reference)
+N_total      <- 340e6        # ~340 million
+prop_15_64   <- 0.647
+N_15_64      <- N_total * prop_15_64
+
+## For PrEP, we care about the *at-risk* group, not all 15–64.
+## Choose this based on your epi judgment (e.g. MSM + high-risk).
+## You can change 6e6 to whatever you prefer.
+N_at_risk    <- 3e6
+b <- 12/13  # prep duration
+m <- 1/35   # background death rate
+
+## 3) Known mean duration on PrEP -> discontinuation rate b ----
+
+mean_duration_months <- 10            # given
+mean_duration_years  <- mean_duration_months / 12
+b <- 1 / mean_duration_years            # per year
+
+## 4) Asymptotic PrEP users P_inf ----
+## Use the maximum observed number (or last year) as a proxy for P_inf.
+P_inf <- max(PrEP_data$PrEP_Users, na.rm = TRUE)
+
+## 5) Solve for PrEP uptake p at equilibrium ----
+## From: P_inf = (p / (p + b)) * N_at_risk
+## => p = (P_inf * b) / (N_at_risk - P_inf)
+b_eff <- b + m 
+p <- (P_inf * b_eff) / (N_at_risk - P_inf)
+
+## 6) OPTIONAL: Fit logistic curve to PrEP users (for K, r only) ----
+## This is just descriptive; p and b above are the ones to use in the S-P model.
+
+## Quick initial guess for r from early exponential growth
+p_regression <- lm(log(PrEP_Users) ~ Year, data = PrEP_data)
+r_start <- unname(coef(p_regression)["Year"])
+if (!is.finite(r_start)) r_start <- 0.4
+
+## Logistic fit: P(t) = K / (1 + exp(-r * (Year - t0)))
+fit_logistic <- nlsLM(
+  PrEP_Users ~ K / (1 + exp(-r * (Year - t0))),
+  data = PrEP_data,
+  start = list(
+    K  = max(PrEP_data$PrEP_Users) * 1.2,   # a bit above max as starting guess
+    r  = r_start,
+    t0 = median(PrEP_data$Year)
+  )
+)
+
+logistic_pars <- coef(fit_logistic)
+K_hat  <- as.numeric(logistic_pars["K"])
+r_hat  <- as.numeric(logistic_pars["r"])
+t0_hat <- as.numeric(logistic_pars["t0"])
+
+## 7) Print results ----
+
+cat("\n================= POPULATION ASSUMPTIONS =================\n")
+cat("Total US 15–64 population (reference):",
+    format(round(N_15_64), big.mark = ","), "\n")
+cat("At-risk population used for PrEP model N_at_risk:",
+    format(round(N_at_risk), big.mark = ","), "\n")
+
+cat("\n================= DURATION & DISCONTINUATION =============\n")
+cat("Mean duration on PrEP (months):", mean_duration_months, "\n")
+cat("Mean duration on PrEP (years):", round(mean_duration_years, 3), "\n")
+cat("Discontinuation rate b:", round(b, 3), "per year\n")
+
+cat("\n================= EQUILIBRIUM & UPTAKE ===================\n")
+cat("Approx. asymptotic PrEP users P_inf:",
+    format(round(P_inf), big.mark = ","), "\n")
+cat("Equilibrium coverage P_inf / N_at_risk:",
+    round(P_inf / N_at_risk * 100, 2), "%\n\n")
+
+cat(">>> PrEP uptake rate p (S -> P):\n")
+cat("    p =", round(p, 4), "per susceptible per year\n")
+cat("    i.e.,", round(p * 100, 2),
+    "% of susceptible at-risk adults initiate PrEP each year\n")
+
+cat("\n================= LOGISTIC FIT (DESCRIPTIVE) =============\n")
+cat("Logistic K_hat (carrying capacity for PrEP users):",
+    format(round(K_hat), big.mark = ","), "\n")
+cat("Logistic growth rate r_hat:", round(r_hat, 3), "per year\n")
+cat("Logistic inflection year t0_hat:", round(t0_hat, 2), "\n")
+cat("==========================================================\n\n")
+
+```
+
