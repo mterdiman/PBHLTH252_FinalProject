@@ -1,0 +1,539 @@
+---
+author: "Mira and Angela"
+output: pdf_document
+---
+
+```{r}
+library(knitr)
+source("setup.R")
+```
+
+In this document, we use our estimated values of p and R0 to better understand how PrEP/ART uptake and adherence impact incidence over time.
+
+# Generating Baseline Situation:
+
+```{r}
+#comparing two parameter sets from pre and post covid
+theta_final_pre
+theta_final_post
+
+#rudimentary: averaging the two to get overall values
+sim_theta <- (theta_final_pre + theta_final_post) / 2
+
+# calculating overall R0
+gamma <- sim_theta["gamma"]; mu <- sim_theta["mu"]
+s     <- sim_theta["s"];     m  <- sim_theta["m"]
+c_c   <- sim_theta["c"]
+
+overall_R0 <- (c_c * S0 / N0) * beta_I_hat * (
+  1 / (gamma + mu + m) +
+  rho * gamma / ((gamma + mu + m) * (s + m))
+)
+
+overall_R0
+```
+
+Our R0 is 1.57, which is pretty close to 1. Now we can simulate a baseline trajectory:
+
+```{r}
+library(tidyverse)
+library(deSolve)
+
+#define function to run specific parameter scenario
+run_scenario <- function(theta, initState, years = 10) {
+  
+  # 1. Time grid (monthly for 'years' years)
+  times <- seq(0, years, by = 1/12)
+  
+  # 2. Solve ODE
+  traj <- data.frame(ode(
+    y     = initState,
+    times = times,
+    func  = HIV_ode,
+    parms = theta,
+    method = "ode45"
+  ))
+  
+  # 3. Compute total population
+  N_traj <- traj$S + traj$P + traj$I + traj$T + traj$U
+  
+  # 4. Compute force of infection
+  lambda_traj <- theta["c"] *
+    (theta["beta_I"] * traj$I +
+       theta["beta_T"] * traj$T) / N_traj
+  
+  # 5. Monthly incidence
+  Inc_monthly <- lambda_traj * traj$S * (1/12)
+  
+  # 6. Return a tibble INCLUDING all SPITU states
+  tibble(
+    time_years = times,
+    Month      = times * 12,
+    S = traj$S,
+    P = traj$P,
+    I = traj$I,
+    T = traj$T,
+    U = traj$U,
+    Incidence = Inc_monthly
+  )
+}
+
+
+#defining initial state
+N0 <- 6e6
+initState <- c(
+  S = N0 - 40000,
+  P = 0,
+  I = 40000,
+  T = 0,
+  U = 0
+)
+
+theta_baseline <- sim_theta # to plot baseline
+initState_baseline <- initState # Baseline initial state
+
+
+sim_baseline <- run_scenario(theta_baseline, initState_baseline, years = 10) %>%
+  mutate(scenario = "Baseline")
+
+#plot all states, and plot incidence
+
+sim_baseline_long <- sim_baseline %>%
+  select(time_years, S, P, I, T, U) %>%
+  pivot_longer(cols = c(S, P, I, T, U),
+               names_to = "State",
+               values_to = "Count")
+
+ggplot(sim_baseline_long, aes(x = time_years, y = Count, color = State)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    title = "SPITU State Trajectories Under Baseline Scenario"
+  ) +
+  theme_minimal(base_size = 14)
+
+sim_baseline_long %>%
+  filter(State %in% c("I", "T", "U")) %>%
+  ggplot(aes(x = time_years, y = Count, color = State)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    title = "ITU Model Trajectories Under Baseline Scenario"
+  ) +
+  theme_minimal()
+
+write_csv(sim_baseline, "sim_baseline.csv")
+```
+
+# Generating Increased PrEP Uptake Situation:
+
+```{r}
+#doubling PrEP Uptake and halving PrEP discontinuation
+theta_prep <- sim_theta
+theta_prep["p"] <- sim_theta["p"] * 2       # double uptake (example)
+theta_prep["b"] <- sim_theta["b"] * 0.5     # halve discontinuation
+
+sim_prep <- run_scenario(theta_prep, initState_baseline, years = 10) %>%
+  mutate(scenario = "Improved PrEP")
+
+sim_prep_long <- sim_prep %>%
+  select(time_years, S, P, I, T, U) %>%
+  pivot_longer(cols = c(S, P, I, T, U),
+               names_to = "State",
+               values_to = "Count")
+
+sim_prep_long %>%
+  filter(State %in% c("I", "T", "U")) %>%
+  ggplot(aes(x = time_years, y = Count, color = State)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    title = "ITU Model Trajectories Under PrEP Intervention"
+  ) +
+  theme_minimal()
+```
+
+# Generating Increased ART Situation
+
+```{r}
+theta_art <- sim_theta
+
+theta_art["gamma"] <- sim_theta["gamma"] * 1.5   # faster ART initiation
+
+rho_art <- rho * 0.2                # reduce infectiousness on ART by 20%
+theta_art["beta_T"] <- rho_art * sim_theta["beta_I"]
+
+sim_art <- run_scenario(theta_art, initState_baseline, years = 10) %>%
+  mutate(scenario = "Improved ART")
+
+sim_art_long <- sim_art %>%
+  select(time_years, S, P, I, T, U) %>%
+  pivot_longer(cols = c(S, P, I, T, U),
+               names_to = "State",
+               values_to = "Count")
+
+sim_art_long %>%
+  filter(State %in% c("I", "T", "U")) %>%
+  ggplot(aes(x = time_years, y = Count, color = State)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    title = "ITU Model Trajectories Under ART Intervention"
+  ) +
+  theme_minimal()
+```
+
+# Combining Interventions
+
+```{r}
+
+theta_combo <- theta_prep            # start from PrEP changes
+theta_combo["gamma"]  <- theta_art["gamma"]
+theta_combo["beta_T"] <- theta_art["beta_T"]
+
+sim_combo <- run_scenario(theta_combo, initState_baseline, years = 10) %>%
+  mutate(scenario = "PrEP + ART")
+
+
+sim_combo_long <- sim_combo %>%
+  select(time_years, S, P, I, T, U) %>%
+  pivot_longer(cols = c(S, P, I, T, U),
+               names_to = "State",
+               values_to = "Count")
+
+sim_combo_long %>%
+  filter(State %in% c("I", "T", "U")) %>%
+  ggplot(aes(x = time_years, y = Count, color = State)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    title = "ITU Model Trajectories Under Combined Interventions"
+  ) +
+  theme_minimal()
+```
+
+# Plot to Directly Compare Interventions to Baseline
+
+```{r}
+# Combine all scenarios for plotting
+sim_all <- bind_rows(sim_baseline, sim_prep, sim_art, sim_combo)
+# 
+# 
+# ggplot(sim_all, aes(x = time_years, y = Incidence, color = scenario)) +
+#   geom_line(linewidth = 1.2) +
+#   labs(
+#     x = "Years from Baseline",
+#     y = "Monthly HIV Incidence",
+#     title = "Projected HIV Incidence Under PrEP and ART Scenarios"
+#   ) +
+#   theme_minimal(base_size = 15)
+# 
+# 
+# sim_baseline_short <- sim_baseline %>%
+#   select(time_years, Inc_baseline = Incidence)
+# 
+# sim_rel <- sim_all %>%
+#   left_join(sim_baseline_short, by = "time_years") %>%
+#   mutate(rel_change = Incidence / Inc_baseline)
+# 
+# ggplot(sim_rel, aes(x = time_years, y = rel_change, color = scenario)) +
+#   geom_hline(yintercept = 1, linetype = "dashed") +
+#   geom_line(linewidth = 1.2) +
+#   labs(
+#     x = "Years from Baseline",
+#     y = "Incidence Relative to Baseline",
+#     title = "Relative Impact of PrEP/ART Improvements on HIV Incidence"
+#   ) +
+#   theme_minimal(base_size = 15)
+
+```
+
+# More Combination Plots
+
+```{r}
+# plotting infections over time in all three intervention scenarios
+
+sim_all %>%
+  select(time_years, I, scenario) %>%
+  ggplot(aes(x = time_years, y = I, color = scenario)) +
+  geom_line(linewidth = 1.1) +
+  theme_minimal() +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    color = "Intervention"
+  ) +
+  ggtitle("Number of HIV Infections Over 10-Year Period Across 3 Interventions")
+
+sim_all %>%
+  select(time_years, I, T, U, scenario) %>%
+  mutate(per_U = U / (I + T + U)) %>%
+  ggplot(aes(x = time_years, y = per_U, color = scenario)) +
+  geom_line(linewidth = 1.1) +
+  theme_minimal() +
+  labs(
+    x = "Years",
+    y = "Population Count",
+    color = "Intervention"
+  ) +
+  ggtitle("Proportion of Infected Individuals Virally Suppressed Over 10-Year Period Across 3 Interventions")
+
+```
+```{r}
+library(knitr)
+sim_all%>%
+  filter(time_years == 10) %>%
+  mutate(Incidence = round(Incidence, 4)) %>%
+  mutate(inc_red = (1 - (Incidence/6091.2076))*100) %>%
+  select(scenario, Incidence, inc_red) %>%
+  rename("% Reduction Compared to Baseline" = inc_red,
+         "Scenario" = scenario, 
+         "Raw Incidence" = Incidence) %>%
+  as_tibble() %>%
+  kable(caption = "Ten Year HIV Incidence Under Three Interventions")
+```
+
+
+# Focusing on Incidence Reduction
+
+## PrEP Intervention
+
+```{r}
+#Increasing uptake by 25%, reducing infectioness by 25%
+theta_combo_1 <- sim_theta
+theta_combo_1["p"] <- sim_theta["p"] * 1.25
+theta_combo_1["b"] <- sim_theta["b"] * 0.75 
+
+theta_combo_2 <- sim_theta
+theta_combo_2["p"] <- sim_theta["p"] * 1.5
+theta_combo_2["b"] <- sim_theta["b"] * 0.5
+
+theta_combo_3 <- sim_theta
+theta_combo_3["p"] <- sim_theta["p"] * 1.75
+theta_combo_3["b"] <- sim_theta["b"] * 0.25
+
+# theta_combo_1["gamma"] <- sim_theta["gamma"] * 1.5   # faster ART initiation
+# 
+# rho_art <- rho * 0.2                # reduce infectiousness on ART by 20%
+# theta_art["beta_T"] <- rho_art * sim_theta["beta_I"]
+
+
+sim_prep_1 <- run_scenario(theta_combo_1, initState_baseline, years = 10) %>%
+  mutate(scenario = "25% Reduction/Increase")
+sim_prep_2 <-  run_scenario(theta_combo_2, initState_baseline, years = 10) %>%
+  mutate(scenario = "50% Reduction/Increase")
+sim_prep_3 <-  run_scenario(theta_combo_3, initState_baseline, years = 10) %>%
+  mutate(scenario = "75% Reduction/Increase")
+
+sim_all_prep <- bind_rows(sim_baseline, sim_prep_1, sim_prep_2, sim_prep_3)
+
+sim_all_prep %>%
+  ggplot(aes(x = time_years, y = Incidence, color = scenario)) +
+  geom_line()
+
+library(knitr)
+sim_all_prep %>%
+  filter(time_years == 10) %>%
+  mutate(Incidence = round(Incidence, 4)) %>%
+  mutate(inc_red = (1 - (Incidence/6091.2076))*100) %>%
+  select(scenario, Incidence, inc_red) %>%
+  rename("% Reduction Compared to Baseline" = inc_red,
+         "Scenario" = scenario, 
+         "Raw Incidence" = Incidence) %>%
+  as_tibble() %>%
+  kable(caption = "Ten Year HIV Incidence Under Increased PrEP Uptake and Decreased PrEP Discontinuation")
+```
+
+
+## ART Intervention
+
+```{r}
+theta_combo_1 <- sim_theta
+theta_combo_1["gamma"] <- sim_theta["gamma"] * 1.25
+
+theta_combo_2 <- sim_theta
+theta_combo_2["gamma"] <- sim_theta["gamma"] * 1.5
+
+
+theta_combo_3 <- sim_theta
+theta_combo_3["gamma"] <- sim_theta["gamma"] * 1.75
+
+
+sim_ART_1 <- run_scenario(theta_combo_1, initState_baseline, years = 10) %>%
+  mutate(scenario = "25% Increase")
+sim_ART_2 <-  run_scenario(theta_combo_2, initState_baseline, years = 10) %>%
+  mutate(scenario = "50% Increase")
+sim_ART_3 <-  run_scenario(theta_combo_3, initState_baseline, years = 10) %>%
+  mutate(scenario = "75% Increase")
+
+sim_all_ART <- bind_rows(sim_baseline, sim_ART_1, sim_ART_2, sim_ART_3)
+
+sim_all_ART %>%
+  ggplot(aes(x = time_years, y = Incidence, color = scenario)) +
+  geom_line()
+
+sim_all_ART %>%
+  filter(time_years == 10) %>%
+  mutate(Incidence = round(Incidence, 4)) %>%
+  mutate(inc_red = (1 - (Incidence/6091.2076))*100) %>%
+  select(scenario, Incidence, inc_red) %>%
+  rename("% Reduction Compared to Baseline" = inc_red,
+         "Scenario" = scenario, 
+         "Raw Incidence" = Incidence) %>%
+  as_tibble() %>%
+  kable(caption = "Ten Year HIV Incidence Under Increased ART Uptake")
+```
+
+## Combo Intervention
+
+```{r}
+theta_combo_1 <- sim_theta
+theta_combo_1["gamma"] <- sim_theta["gamma"] * 1.25
+theta_combo_1["p"] <- sim_theta["p"] * 1.25
+theta_combo_1["b"] <- sim_theta["b"] * 0.75 
+
+
+theta_combo_2 <- sim_theta
+theta_combo_2["gamma"] <- sim_theta["gamma"] * 1.5
+theta_combo_2["p"] <- sim_theta["p"] * 1.5
+theta_combo_2["b"] <- sim_theta["b"] * 0.5
+
+
+theta_combo_3 <- sim_theta
+theta_combo_3["gamma"] <- sim_theta["gamma"] * 1.75
+theta_combo_3["p"] <- sim_theta["p"] * 1.75
+theta_combo_3["b"] <- sim_theta["b"] * 0.25
+
+
+sim_combo_1 <- run_scenario(theta_combo_1, initState_baseline, years = 10) %>%
+  mutate(scenario = "25% Increase")
+sim_combo_2 <-  run_scenario(theta_combo_2, initState_baseline, years = 10) %>%
+  mutate(scenario = "50% Increase")
+sim_combo_3 <-  run_scenario(theta_combo_3, initState_baseline, years = 10) %>%
+  mutate(scenario = "75% Increase")
+
+sim_all_combo <- bind_rows(sim_baseline, sim_combo_1, sim_combo_2, sim_combo_3)
+
+sim_all_combo %>%
+  ggplot(aes(x = time_years, y = Incidence, color = scenario)) +
+  geom_line(linewidth = 1.1) +
+  theme_minimal() +
+  labs(
+    x = "Years",
+    y = "Incidence",
+    color = "Intervention"
+  ) +
+  ggtitle("Relative HIV Incidence to Baseline Over 10 \nYears After Implementing PrEP and ART Interventions")
+  
+
+sim_all_combo %>%
+  filter(time_years == 10) %>%
+  mutate(Incidence = round(Incidence, 4)) %>%
+  mutate(inc_red = (1 - (Incidence/6091.2076))*100) %>%
+  select(scenario, Incidence, inc_red) %>%
+  rename("% Reduction Compared to Baseline" = inc_red,
+         "Scenario" = scenario, 
+         "Raw Incidence" = Incidence) %>%
+  as_tibble() %>%
+  kable(caption = "Ten Year HIV Incidence Under Both PrEP and ART Interventions")
+```
+
+Expanding this for write-up:
+
+```{r}
+library(tidyverse)
+
+# 10% to 80% in 5% steps
+pct_increase_vec <- seq(0.10, 0.80, by = 0.05)
+
+# Run all intervention scenarios
+sim_combos <- pct_increase_vec %>%
+  map_dfr(function(pct_inc) {
+    theta_combo <- sim_theta
+    theta_combo["gamma"] <- sim_theta["gamma"] * (1 + pct_inc)  # increase ART initiation
+    theta_combo["p"]     <- sim_theta["p"]     * (1 + pct_inc)  # increase PrEP uptake
+    theta_combo["b"]     <- sim_theta["b"]     * (1 - pct_inc)  # decrease PrEP drop-out
+
+    run_scenario(theta_combo, initState_baseline, years = 10) %>%
+      mutate(
+        scenario = paste0(round(pct_inc * 100), "% Increase")
+      )
+  })
+
+# Add baseline
+sim_all_combo <- bind_rows(
+  sim_baseline %>% mutate(scenario = "Baseline"),
+  sim_combos
+)
+
+# Plot (unchanged, now with many more lines)
+sim_all_combo %>%
+  ggplot(aes(x = time_years, y = Incidence, color = scenario)) +
+  geom_line(linewidth = 1.1) +
+  theme_minimal() +
+  scale_color_viridis_d(option = "turbo") +
+  labs(
+    x = "Years",
+    y = "Incidence",
+    color = "Intervention"
+  ) +
+  ggtitle("Relative HIV Incidence to Baseline Over 10 \nYears After Implementing PrEP and ART Interventions")
+
+# get baseline incidence at year 10 from the simulated data
+baseline_inc <- sim_all_combo %>%
+  filter(scenario == "Baseline", time_years == 10) %>%
+  pull(Incidence)
+
+sim_all_combo %>%
+  filter(time_years == 10) %>%
+  mutate(
+    Incidence = round(Incidence, 2),
+    `% Reduction Compared to Baseline` = round((1 - Incidence / baseline_inc) * 100, 2)
+  ) %>%
+  select(
+    Scenario = scenario,
+    `Raw Incidence` = Incidence,
+    `% Reduction Compared to Baseline`
+  ) %>%
+  as_tibble() %>%
+  kable(caption = "Ten-Year HIV Incidence Under PrEP and ART Interventions")
+```
+To determine % cut off point at which incidence is monotonically decreasing:
+
+```{r}
+library(dplyr)
+
+monotone_check <- sim_all_combo %>%
+  group_by(scenario) %>%
+  arrange(time_years, .by_group = TRUE) %>%
+  mutate(
+    dInc = Incidence - lag(Incidence)   # change from previous timepoint
+  ) %>%
+  summarise(
+    any_increase = any(dInc > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+monotone_check
+
+sim_all_combo %>%
+  filter(time_years == 10) %>%
+  mutate(
+    Incidence = round(Incidence, 2),
+    `% Reduction Compared to Baseline` = round((1 - Incidence / baseline_inc) * 100, 2)
+  ) %>%
+  select(
+    Scenario = scenario,
+    `Raw Incidence` = Incidence,
+    `% Reduction Compared to Baseline`
+  ) %>%
+  as_tibble() %>%
+  kable(caption = "Ten-Year HIV Incidence Under PrEP and ART Interventions")
+```
+
+At some point between a 20-25% intervention, we get a monotonically decreasing curve, which means HIV incidence will strictly decrease over time. 
